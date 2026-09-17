@@ -1,0 +1,230 @@
+# babysit-sh
+
+[![CI](https://github.com/vvanghelue/babysit-sh/actions/workflows/ci.yml/badge.svg)](https://github.com/vvanghelue/babysit-sh/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
+An agent-agnostic supervisor for long-running agent tasks. One shell script owns
+the task; it starts fresh worker sessions one after another until the work is
+done, the budget runs out, or a human stops it.
+
+Works with **pi**, **opencode**, **codex**, **claude**, and anything else that
+can be started non-interactively. No daemon, no database, no service — state is
+files on disk, and the supervisor is just a process you can run under `systemd`,
+`tmux`, `nohup`, or `babysit.sh start`.
+
+## The idea
+
+A long task does not fit in one context window, and one agent session cannot be
+trusted to hand the task to its successor. So babysit inverts the usual pattern:
+
+```
+   babysit.sh (supervisor process, runs for hours)
+        │
+        ├─ session 1   bounded work, writes STATE.md/WORKLOG.md, exits
+        ├─ session 2   same
+        ├─ session 3   same  ... until done / budget / stop
+        └─ ...
+```
+
+The supervisor — not the agent — decides when a new session starts. That single
+design choice buys the properties that matter for long tasks:
+
+| | self-continuing loop | **babysit-sh** |
+| --- | --- | --- |
+| who starts the next session | the agent | **the supervisor** |
+| agent crashes / exits early | loop silently dies | **supervisor sees the exit code** |
+| agent forgets to write state | next session is lost | **counted as a stall, escalated** |
+| agent runs forever | context fills, cost burns | **killed at `--session-timeout`** |
+| agent starts a second session | possible | **impossible: it isn't asked to** |
+| runs for days | one long process tree | **supervisor restarts sessions fresh** |
+
+The agents stay simple and disposable. All the judgement about "should this keep
+going" lives in one readable bash file.
+
+## Install
+
+No checkout needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.sh | bash
+# or into a specific project, pinned to a release:
+curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.sh \
+  | bash -s -- ~/my-project --ref v0.1.0
+```
+
+That creates `<project>/.babysit/` with the driver, `TASK.md`, `STATE.md`,
+`WORKLOG.md`, and the entry-point prompt. From a checkout, `./install.sh
+~/my-project` (or `--link`) does the same.
+
+The installer runs nothing; it only writes files. It does start agents with
+permission checks disabled later, though, so read `install.sh` before piping it,
+or pin `--ref` to a tag.
+
+## Quick start
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.sh | bash -s -- ~/my-project
+
+$EDITOR ~/my-project/.babysit/TASK.md        # goal + definition of done
+cd ~/my-project
+.babysit/babysit.sh start                    # detached supervisor
+.babysit/babysit.sh status                   # watch it
+.babysit/babysit.sh stop --kill              # stop it
+```
+
+Or let an agent do the setup: hand it [`babysit.md`](babysit.md).
+
+## Commands
+
+```
+babysit.sh detect                  which harness am I inside?
+babysit.sh init [--task T]         create .babysit/ (TASK.md, STATE.md, ...)
+babysit.sh run [options]           supervise sessions in the foreground
+babysit.sh start [options]         same as run --detach: survives your shell
+babysit.sh once                    run exactly one session (foreground)
+babysit.sh budget                  session time budget + decision (workers)
+babysit.sh print                   prompt the next session will receive
+babysit.sh status                  supervisor alive? progress? last log
+babysit.sh logs [N]                tail the supervisor log
+babysit.sh tail                    tail the current session log
+babysit.sh done [--note T]         mark the task complete
+babysit.sh halt --reason R         stop the supervisor with a reason
+babysit.sh stop [--kill]           stop after this session / right now
+babysit.sh resume                  clear stop/halted, keep the state
+babysit.sh reset --yes             wipe runtime state, keep TASK.md
+```
+
+`--dir D` works on every subcommand, so several tasks can run side by side; each
+one is just a `.babysit` directory and a supervisor process.
+
+### Run options
+
+| flag | env | default | meaning |
+| --- | --- | --- | --- |
+| `--max-sessions N` | `BABYSIT_MAX_SESSIONS` | 100 | hard cap on sessions |
+| `--session-timeout S` | `BABYSIT_SESSION_TIMEOUT` | 3600 | kill a session that overruns |
+| `--max-failures N` | `BABYSIT_MAX_FAILURES` | 5 | consecutive failures → halt |
+| `--stall-limit N` | `BABYSIT_STALL_LIMIT` | 3 | sessions with no `STATE.md` change → halt |
+| `--sleep S` | `BABYSIT_SLEEP` | 5 | pause between sessions |
+| `--until CMD` | `BABYSIT_UNTIL` | — | `CMD` exits 0 → done |
+| `--harness H` | `BABYSIT_HARNESS` | auto | pi / opencode / codex / claude |
+| `--model M` | `BABYSIT_MODEL` | inherited | model for worker sessions |
+| `--provider P` | `BABYSIT_PROVIDER` | inherited | provider (pi) |
+
+Anything else:
+
+```bash
+BABYSIT_CMD='mytool run --prompt-file @@PROMPT_FILE@@' babysit.sh run
+```
+
+## Harnesses
+
+| harness | worker session is launched as | detected by |
+| --- | --- | --- |
+| pi | `pi --approve -p "<prompt>" --provider P --model M` | `PI_SESSION_FILE`, `PI_SESSION_ID` |
+| opencode | `opencode run --auto --dir <project> --model provider/model "<prompt>"` | `OPENCODE_CLIENT`, process tree |
+| codex | `codex exec --sandbox workspace-write --skip-git-repo-check -C <project> "<prompt>"` | `CODEX_HOME`, process tree |
+| claude | `claude -p "<prompt>" --permission-mode bypassPermissions --add-dir <project>` | `CLAUDECODE`, process tree |
+| anything | `BABYSIT_CMD='mytool run --prompt-file @@PROMPT_FILE@@'` | `BABYSIT_HARNESS=<name>` |
+
+Detection order: `BABYSIT_HARNESS`, the variables a harness sets for the session
+it spawned, the process tree, then whichever CLIs are installed. Every worker
+gets `BABYSIT_DIR`, `BABYSIT_SESSION`, `BABYSIT_DEADLINE`, so a session can
+always measure itself without guessing.
+
+## The worker contract
+
+Sessions are disposable and get one injected contract (`build_contract` in
+`babysit.sh`):
+
+- read `TASK.md`, `STATE.md`, `WORKLOG.md` before touching anything
+- `babysit.sh budget` at the start and before opening new work;
+  `DECISION=handoff-now` means close the atomic step, write state, exit
+- leave the workspace working at the end of every session
+- rewrite `STATE.md`, append one `WORKLOG.md` entry before exiting
+- `babysit.sh done --note "..."` when the goal is reached
+- `babysit.sh halt --reason "..."` when genuinely blocked
+- never launch another session, never wait, never sleep to stay alive
+
+The budget decision is time-based, because the supervisor already knows the
+wall-clock bound it will enforce:
+
+```
+SESSION=7 (of 100 max)
+SESSION_ELAPSED=412s  SESSION_TIMEOUT=3600s  REMAINING=3188s
+SESSIONS_LEFT=93  CONSECUTIVE_FAILURES=0
+SESSIONS_WITHOUT_STATE_CHANGE=0 (stall limit 3)
+DECISION=continue
+```
+
+## State files
+
+Everything lives in `<project>/.babysit/`:
+
+| file | role |
+| --- | --- |
+| `TASK.md` | the goal and its definition of done — stable, read by every session |
+| `STATE.md` | done / in progress / next / blockers — live, rewritten each session |
+| `WORKLOG.md` | append-only history, one entry per session |
+| `prompt.next.md` | the exact prompt handed to the last session |
+| `counters` | sessions run, consecutive failures, sessions without a state change |
+| `state.hash` | the previous `STATE.md` hash, used to detect stalls |
+| `supervisor.pid`, `session.pid` | who is running right now |
+| `heartbeat`, `session.deadline` | liveness and the current session's time budget |
+| `DONE`, `HALTED`, `stop` | success, automatic halt with a reason, human stop |
+| `supervisor.log` | supervisor decisions, session exits, halt reasons |
+| `sessions/*.log` | the raw output of every worker session |
+
+The loop's memory is only what is written in those files.
+
+## Failure modes it handles
+
+- **A worker that exits without writing state** — `STATE.md` is hashed after
+  every session; `--stall-limit` sessions in a row with no change halts the run
+  with `no progress`, instead of paying for a loop that spins.
+- **A worker that crashes** — the exit code is recorded; `--max-failures`
+  consecutive failures halt with the log path in `HALTED`.
+- **A worker that never finishes** — killed as a process group at
+  `--session-timeout` (SIGTERM, then SIGKILL), so the agent's children die too.
+- **A worker that tries to end the run by "being done"** — only `babysit.sh
+  done` or a successful `--until` probe counts. A session that just exits gets
+  another session.
+- **Two supervisors on one task** — `supervisor.pid` is checked; `run` refuses.
+- **A watchdog that dies** — `status` compares the pid and the heartbeat and
+  says so instead of reporting a healthy loop.
+- **A human who wants it over** — `stop` lets the current session finish,
+  `stop --kill` ends it now; the stop file is honoured before every launch.
+
+## Tests
+
+```bash
+./test/run-tests.sh
+```
+
+62 checks, all with stub worker sessions — no agent CLI, no model, no network.
+They cover the piped installer, the budget decision, one-shot and supervised
+runs, the done marker, budget/failure/stall halts, session-timeout killing,
+stop/resume, the detached supervisor, the prompt contract, and the state
+commands.
+
+## Status
+
+- **pi**: adapter implemented; the supervisor, timeouts, stall detection and the
+  detached-supervisor path are exercised end to end with stub sessions.
+- **opencode / codex / claude**: adapters written from the official CLI
+  documentation and exercised only through the stub test suite.
+- **TODO**: graceful `SIGTERM` handling in the supervisor, per-session JSON
+  records, `systemd` unit examples, a TUI/status web view, multi-task registry.
+
+## Relationship to agent-loop
+
+[agent-loop](https://github.com/vvanghelue/agent-loop) makes an agent continue
+its own work: each session launches the next one itself. It is smaller and has
+no supervisor. babysit-sh is the opposite trade: one extra process, and in
+exchange the loop survives sessions that do not cooperate. Use agent-loop when
+you trust the agent to hand off; use babysit when the task is long, expensive,
+or unattended.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
