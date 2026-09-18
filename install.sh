@@ -17,6 +17,7 @@
 #   --repo OWNER/NAME   source repository (default: vvanghelue/babysit-sh)
 #   --link              symlink the driver instead of copying it (checkout only)
 #   --driver-only       do not download the entry-point prompt
+#   --no-agents         do not register the "Using babysit" trigger in AGENTS.md
 #   -h | --help         this text
 #
 # AGENT_LOOP_RAW_BASE / BABYSIT_RAW_BASE override the download base URL (used by
@@ -29,6 +30,7 @@ REF="main"
 PROJECT=""
 MODE="copy"
 DRIVER_ONLY="no"
+AGENTS="yes"
 
 usage() {
   cat <<'EOF'
@@ -47,6 +49,7 @@ Options:
   --repo OWNER/NAME   source repository (default: vvanghelue/babysit-sh)
   --link              symlink the driver instead of copying it (checkout only)
   --driver-only       do not download the entry-point prompt
+  --no-agents         do not register the "Using babysit" trigger in AGENTS.md
   -h | --help         this text
 EOF
 }
@@ -57,6 +60,7 @@ while [ $# -gt 0 ]; do
     --ref)         REF="${2:?--ref needs a value}"; shift ;;
     --repo)        REPO="${2:?--repo needs a value}"; shift ;;
     --driver-only) DRIVER_ONLY="yes" ;;
+    --no-agents)   AGENTS="no" ;;
     -h|--help)     usage; exit 0 ;;
     -*)            printf 'ERROR: unknown option: %s\n' "$1" >&2; exit 2 ;;
     *)             PROJECT="$1" ;;
@@ -131,6 +135,13 @@ if [ "$DRIVER_ONLY" != "yes" ]; then
   fi
 fi
 
+# Register the project-level convention so that, from now on, any agent session
+# in this project understands "Using babysit, <goal>" without being told again.
+if [ "$AGENTS" = "yes" ] && [ "$DRIVER_ONLY" != "yes" ]; then
+  BABYSIT_PROJECT="$PROJECT" BABYSIT_DIR="$PROJECT/.babysit" "$DRIVER" agents-md \
+    || printf 'WARNING: could not update AGENTS.md; run: %s agents-md --write\n' "$DRIVER" >&2
+fi
+
 sha() {
   if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
@@ -159,4 +170,7 @@ next:
      watch:  cd $PROJECT && .babysit/babysit.sh status
      logs:   cd $PROJECT && .babysit/babysit.sh tail
      stop:   cd $PROJECT && .babysit/babysit.sh stop --kill
+
+from now on, in this project, tell your agent "Using babysit, <goal>" and it
+will write TASK.md and start the supervisor for you (AGENTS.md was updated).
 EOF

@@ -227,6 +227,9 @@ fi
 [ -x "$PIPE_PROJ/.babysit/babysit.sh" ] && ok "driver installed and executable" || bad "driver not executable"
 [ -f "$PIPE_PROJ/.babysit/TASK.md" ] && ok "init ran during the piped install" || bad "init did not run"
 [ -f "$PIPE_PROJ/.babysit/ENTRYPOINT.md" ] && ok "entry-point prompt installed" || bad "entry-point prompt missing"
+[ -f "$PIPE_PROJ/AGENTS.md" ] && ok "installer registered the trigger in AGENTS.md" || bad "AGENTS.md not updated"
+has "AGENTS.md carries the magic phrase" "Using babysit" "$(cat "$PIPE_PROJ/AGENTS.md")"
+[ -f "$PIPE_PROJ/CLAUDE.md" ] && ok "installer created the CLAUDE.md import" || bad "CLAUDE.md missing"
 has "installer reports the source ref" "@" "$out"
 BAD_PROJ="$WORK/badref"; mkdir -p "$BAD_PROJ"
 if BABYSIT_RAW_BASE="file://$DIR/no-such-ref" bash -s -- "$BAD_PROJ" < "$DIR/install.sh" >/dev/null 2>&1; then
@@ -234,6 +237,32 @@ if BABYSIT_RAW_BASE="file://$DIR/no-such-ref" bash -s -- "$BAD_PROJ" < "$DIR/ins
 else
   ok "bad ref is rejected"
 fi
+
+printf '\n== 14. agents-md: the "Using babysit" convention in AGENTS.md ==\n'
+P="$(newproj agentsproj)"
+printf '# House rules\n\nkeep it tidy\n' >"$P/AGENTS.md"
+"$BABYSIT" agents-md --project "$P" >/dev/null 2>&1
+has "the block teaches the trigger phrase" "Using babysit" "$(cat "$P/AGENTS.md")"
+has "the block forbids starting a supervisor by hand" "never start a worker session by hand" "$(cat "$P/AGENTS.md")"
+has "existing AGENTS.md content is preserved" "keep it tidy" "$(cat "$P/AGENTS.md")"
+[ -f "$P/CLAUDE.md" ] && ok "CLAUDE.md created for Claude Code" || bad "CLAUDE.md missing"
+has "CLAUDE.md imports AGENTS.md" "@AGENTS.md" "$(cat "$P/CLAUDE.md")"
+"$BABYSIT" agents-md --project "$P" >/dev/null 2>&1
+check "running twice leaves exactly one block" "1" "$(grep -c 'BEGIN babysit-sh' "$P/AGENTS.md")"
+check "the house rules survive the second run" "1" "$(grep -c 'keep it tidy' "$P/AGENTS.md")"
+check "the @AGENTS.md import is not duplicated" "1" "$(grep -c '^@AGENTS.md$' "$P/CLAUDE.md")"
+check "check passes on a fresh block" "0" "$("$BABYSIT" agents-md --check --project "$P" >/dev/null 2>&1; echo $?)"
+awk '{ if ($0 ~ /external supervisor, not the agent/) sub(/external supervisor, not the agent/, "CHANGED"); print }' \
+  "$P/AGENTS.md" >"$P/AGENTS.tmp" && mv "$P/AGENTS.tmp" "$P/AGENTS.md"
+check "check fails on an edited block" "1" "$("$BABYSIT" agents-md --check --project "$P" >/dev/null 2>&1; echo $?)"
+"$BABYSIT" agents-md --project "$P" >/dev/null 2>&1
+check "rewrite repairs an edited block" "0" "$("$BABYSIT" agents-md --check --project "$P" >/dev/null 2>&1; echo $?)"
+P2="$(newproj printproj)"
+out="$("$BABYSIT" agents-md --print --project "$P2")"
+has "print shows the block" "Using babysit" "$out"
+[ -f "$P2/AGENTS.md" ] && bad "print wrote AGENTS.md" || ok "print does not write"
+"$BABYSIT" agents-md --no-claude --project "$P2" >/dev/null 2>&1
+[ -f "$P2/CLAUDE.md" ] && bad "--no-claude still created CLAUDE.md" || ok "--no-claude skips CLAUDE.md"
 
 printf '\n== results ==\n'
 printf 'passed: %s\nfailed: %s\n' "$PASS" "$FAIL"

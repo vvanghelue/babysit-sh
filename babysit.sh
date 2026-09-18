@@ -13,6 +13,7 @@
 #
 #   babysit.sh detect                  which harness am I inside?
 #   babysit.sh init [--task T]         create .babysit/ (TASK.md, STATE.md, ...)
+#   babysit.sh agents-md [--print]     register the "Using babysit" trigger in AGENTS.md
 #   babysit.sh run [options]           supervise sessions in the foreground
 #   babysit.sh start [options]         same as run --detach: survives your shell
 #   babysit.sh once                    run exactly one session (foreground)
@@ -274,6 +275,131 @@ build_prompt() {
   if [ -f "$DIR/addendum.md" ]; then
     printf '\n---\n\n# Addendum for the next session\n\n'
     cat "$DIR/addendum.md"
+  fi
+}
+
+# ---------------------------------------------------------------- agents-md --
+# The entry point for humans who do not want to learn babysit: a managed block
+# in AGENTS.md (the cross-tool standard) teaching any future agent session what
+# "Using babysit, <goal>" means. Claude Code reads CLAUDE.md, which only needs
+# to import AGENTS.md -- `@AGENTS.md` on its own line.
+AGENTS_BEGIN='<!-- BEGIN babysit-sh (managed by .babysit/babysit.sh agents-md; do not edit by hand) -->'
+AGENTS_END='<!-- END babysit-sh -->'
+
+agents_block() {
+  printf '%s\n' "$AGENTS_BEGIN"
+  cat <<'AGENTS_BLOCK'
+## babysit — long-running tasks in this project
+
+This project is set up for [babysit-sh](https://github.com/vvanghelue/babysit-sh):
+an external supervisor, not the agent, runs each long task as a chain of fresh
+worker sessions. The driver is `.babysit/babysit.sh`; the task lives in
+`.babysit/TASK.md`.
+
+When the user says **"Using babysit, <goal>"** (or "babysit this", "run this as
+a long task"), do **not** do the work in this session:
+
+1. Write the goal and a *testable* definition of done into `.babysit/TASK.md`,
+   and seed `.babysit/STATE.md` with what already exists and the first next step.
+2. Start the supervisor detached: `.babysit/babysit.sh start`
+   For long tasks add `--max-sessions N`, `--session-timeout S`, and
+   `--until "command"` when a probe can prove the goal is reached.
+3. Reply with the task, the budget, and how to watch or stop it
+   (`status`, `tail`, `logs`, `stop --kill`), then end your turn. Never poll the
+   supervisor, and never start a worker session by hand.
+
+If `.babysit/babysit.sh` is missing, install it:
+
+    curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.sh | bash -s -- .
+
+If your prompt says "You are one worker session", you were started by the
+supervisor: follow that contract and never start a supervisor yourself.
+
+Full entry-point prompt: `.babysit/ENTRYPOINT.md`.
+AGENTS_BLOCK
+  printf '%s\n' "$AGENTS_END"
+}
+
+strip_managed_block() { # strip_managed_block <file> -- file without the block
+  [ -f "$1" ] || return 0
+  awk -v b="$AGENTS_BEGIN" -v e="$AGENTS_END" '
+    $0 == b { skip=1; next }
+    $0 == e { skip=0; next }
+    !skip { print }
+  ' "$1"
+}
+
+extract_managed_block() { # extract_managed_block <file> -- the block, markers included
+  [ -f "$1" ] || return 0
+  awk -v b="$AGENTS_BEGIN" -v e="$AGENTS_END" '
+    $0 == b { inb=1 }
+    inb { print }
+    $0 == e { inb=0 }
+  ' "$1" 2>/dev/null
+}
+
+write_managed_block() { # write_managed_block <file>
+  local f="$1" tmp; tmp="$(mktemp)"
+  strip_managed_block "$f" | awk 'NF { last=NR } { line[NR]=$0 }
+                                  END { for (i=1; i<=last; i++) print line[i] }' >"$tmp"
+  mkdir -p "$(dirname "$f")"
+  {
+    if [ -s "$tmp" ]; then cat "$tmp"; printf '\n'; fi
+    agents_block
+  } >"$f"
+  rm -f "$tmp"
+}
+
+cmd_agents_md() {
+  local mode="write" file="" claude="yes" project="$PROJECT"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --print)     mode="print"; shift ;;
+      --write)     mode="write"; shift ;;
+      --check)     mode="check"; shift ;;
+      --file)      file="${2:?--file needs a value}"; shift 2 ;;
+      --project)   project="${2:?--project needs a value}"; shift 2 ;;
+      --claude)    claude="yes"; shift ;;
+      --no-claude) claude="no"; shift ;;
+      *) die "agents-md: unknown option: $1" ;;
+    esac
+  done
+  [ -n "$file" ] || file="$project/AGENTS.md"
+  local claude_file="$project/CLAUDE.md"
+  [ "$(basename "$file")" = "AGENTS.md" ] || claude="no"
+
+  if [ "$mode" = "print" ]; then
+    agents_block
+    return 0
+  fi
+
+  if [ "$mode" = "check" ]; then
+    local want got
+    want="$(agents_block)"; got="$(extract_managed_block "$file")"
+    if [ -z "$got" ]; then
+      printf 'agents-md: no babysit block in %s\n' "$file" >&2; return 1
+    elif [ "$want" != "$got" ]; then
+      printf 'agents-md: the block in %s is out of date (run: %s agents-md --write)\n' \
+        "$file" "$(basename "$ABS_SELF")" >&2; return 1
+    fi
+    printf 'agents-md: %s is up to date\n' "$file"
+    return 0
+  fi
+
+  write_managed_block "$file"
+  printf 'agents-md: wrote the babysit block to %s\n' "$file"
+
+  if [ "$claude" = "yes" ]; then
+    if [ ! -f "$claude_file" ]; then
+      printf '@AGENTS.md\n' >"$claude_file"
+      printf 'agents-md: created %s importing AGENTS.md (for Claude Code)\n' "$claude_file"
+    elif ! grep -qxF '@AGENTS.md' "$claude_file"; then
+      local t; t="$(mktemp)"
+      { printf '@AGENTS.md\n'; cat "$claude_file"; } >"$t" && mv "$t" "$claude_file"
+      printf 'agents-md: added the @AGENTS.md import to %s (for Claude Code)\n' "$claude_file"
+    else
+      printf 'agents-md: %s already imports AGENTS.md\n' "$claude_file"
+    fi
   fi
 }
 
@@ -788,12 +914,16 @@ cmd_detect() {
 }
 
 usage() {
-  sed -n '2,50p' "$ABS_SELF" | sed 's/^# \{0,1\}//'
+  # Print the header block (line 3 up to the closing ==== banner), uncommented.
+  awk 'NR == 1 { next }
+       /^# =+$/ { if (seen++) exit; next }
+       { sub(/^# ?/, ""); print }' "$ABS_SELF"
 }
 
 case "${1:-help}" in
   detect) cmd_detect ;;
   init)   cmd_init "${@:2}" ;;
+  agents-md|agentsmd) cmd_agents_md "${@:2}" ;;
   run|start)
           if [ "${1}" = "start" ]; then shift; cmd_run --detach "$@"; else shift; cmd_run "$@"; fi ;;
   once)   cmd_once ;;

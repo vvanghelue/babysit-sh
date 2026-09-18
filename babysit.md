@@ -42,14 +42,29 @@ curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.
 ```
 
 That writes `.babysit/babysit.sh` plus `.babysit/TASK.md`, `.babysit/STATE.md`
-and `.babysit/WORKLOG.md`. If you have a checkout of this repo, `./install.sh .`
-does the same thing, and `--link` symlinks instead of copying.
+and `.babysit/WORKLOG.md`, and registers the project-level convention in
+`AGENTS.md` (plus a `CLAUDE.md` that imports it), so that **every future agent
+session in this project knows what "Using babysit, ..." means**. If you have a
+checkout of this repo, `./install.sh .` does the same thing, and `--link`
+symlinks instead of copying. Pass `--no-agents` to skip the `AGENTS.md` update.
 
 Verify it:
 
 ```bash
 .babysit/babysit.sh detect
+.babysit/babysit.sh agents-md --check
 ```
+
+If you installed the driver by hand, register the convention explicitly:
+
+```bash
+.babysit/babysit.sh agents-md --write
+```
+
+From then on the human only has to say **"Using babysit, <goal>"** and the next
+agent session — primed by `AGENTS.md` — writes `TASK.md` and starts the
+supervisor. That is a *different* session from this one: you are setting the
+table, not eating.
 
 ---
 
@@ -117,7 +132,9 @@ Then:
 
 Do **not** babysit it yourself. Do not poll it, do not `wait` for it, do not
 start worker sessions by hand. Reply to the user with the task, the budget, and
-the three commands to watch/stop it, then end your turn.
+the three commands to watch/stop it, then end your turn. Also tell the user that
+in this project they can start further long tasks by saying **"Using babysit,
+<goal>"** — the `AGENTS.md` block you just wrote makes that work.
 
 ---
 
