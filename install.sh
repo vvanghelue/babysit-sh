@@ -123,7 +123,7 @@ if ! bash -n "$DRIVER" 2>/dev/null; then
   exit 1
 fi
 
-"$DRIVER" init --dir "$PROJECT/.babysit" >/dev/null
+BABYSIT_PROJECT="$PROJECT" "$DRIVER" init >/dev/null
 
 ENTRYPOINT="$PROJECT/.babysit/ENTRYPOINT.md"
 if [ "$DRIVER_ONLY" != "yes" ]; then
@@ -138,7 +138,7 @@ fi
 # Register the project-level convention so that, from now on, any agent session
 # in this project understands "Using babysit, <goal>" without being told again.
 if [ "$AGENTS" = "yes" ] && [ "$DRIVER_ONLY" != "yes" ]; then
-  BABYSIT_PROJECT="$PROJECT" BABYSIT_DIR="$PROJECT/.babysit" "$DRIVER" agents-md \
+  BABYSIT_PROJECT="$PROJECT" "$DRIVER" agents-md \
     || printf 'WARNING: could not update AGENTS.md; run: %s agents-md --write\n' "$DRIVER" >&2
 fi
 
@@ -161,15 +161,20 @@ printf '  sha256: %s\n' "$(sha "$DRIVER")"
 cat <<EOF
 
 next:
-  1. write the task (goal + definition of done) in $PROJECT/.babysit/TASK.md
+  1. write the task (goal + definition of done) in
+       $PROJECT/.babysit/tasks/main/TASK.md
   2. start the supervisor:
 
-       cd $PROJECT && .babysit/babysit.sh start      # detached
+       cd $PROJECT && .babysit/babysit.sh start      # detached, task main
        cd $PROJECT && .babysit/babysit.sh run        # foreground, watch it
 
      watch:  cd $PROJECT && .babysit/babysit.sh status
+     list:   cd $PROJECT && .babysit/babysit.sh ls
      logs:   cd $PROJECT && .babysit/babysit.sh tail
      stop:   cd $PROJECT && .babysit/babysit.sh stop --kill
+
+  several long tasks run side by side under one .babysit/: give each one a name
+  and pass --task NAME to init/start/status (the default task is main).
 
 from now on, in this project, tell your agent "Using babysit, <goal>" and it
 will write TASK.md and start the supervisor for you (AGENTS.md was updated).

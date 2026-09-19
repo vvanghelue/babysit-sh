@@ -32,10 +32,10 @@ export BABYSIT_SLEEP=0
 export BABYSIT_KILL_GRACE=3
 unset PI_SESSION_FILE PI_SESSION_ID BABYSIT_CMD BABYSIT_DIR 2>/dev/null || true
 
-newproj() { # newproj <name> -> path, initialized
+newproj() { # newproj <name> -> path, initialized (legacy flat --dir layout)
   local p="$WORK/$1"
   mkdir -p "$p"
-  "$BABYSIT" init --task "test task for $1" --dir "$p/.babysit" >/dev/null 2>&1
+  "$BABYSIT" init --goal "test task for $1" --dir "$p/.babysit" >/dev/null 2>&1
   printf '%s' "$p"
 }
 
@@ -225,7 +225,7 @@ else
   bad "downloaded driver differs from babysit.sh: $out"
 fi
 [ -x "$PIPE_PROJ/.babysit/babysit.sh" ] && ok "driver installed and executable" || bad "driver not executable"
-[ -f "$PIPE_PROJ/.babysit/TASK.md" ] && ok "init ran during the piped install" || bad "init did not run"
+[ -f "$PIPE_PROJ/.babysit/tasks/main/TASK.md" ] && ok "init ran during the piped install" || bad "init did not run"
 [ -f "$PIPE_PROJ/.babysit/ENTRYPOINT.md" ] && ok "entry-point prompt installed" || bad "entry-point prompt missing"
 [ -f "$PIPE_PROJ/AGENTS.md" ] && ok "installer registered the trigger in AGENTS.md" || bad "AGENTS.md not updated"
 has "AGENTS.md carries the magic phrase" "Using babysit" "$(cat "$PIPE_PROJ/AGENTS.md")"
@@ -263,6 +263,43 @@ has "print shows the block" "Using babysit" "$out"
 [ -f "$P2/AGENTS.md" ] && bad "print wrote AGENTS.md" || ok "print does not write"
 "$BABYSIT" agents-md --no-claude --project "$P2" >/dev/null 2>&1
 [ -f "$P2/CLAUDE.md" ] && bad "--no-claude still created CLAUDE.md" || ok "--no-claude skips CLAUDE.md"
+
+printf '\n== 15. multi-task by default: tasks/<name> under one .babysit ==\n'
+P="$WORK/multiproj"; mkdir -p "$P"
+out="$(cd "$P" && "$BABYSIT" init --goal "task alpha" 2>&1)"; rc=$?
+check "init without --dir exits 0" "0" "$rc"
+[ -f "$P/.babysit/tasks/main/TASK.md" ] && ok "the default task lives in tasks/main" || bad "no tasks/main/TASK.md"
+has "the default task carries the goal" "task alpha" "$(cat "$P/.babysit/tasks/main/TASK.md")"
+has "init names the task it created" "initialized task main" "$out"
+(cd "$P" && "$BABYSIT" init --task beta --goal "task beta" >/dev/null 2>&1)
+[ -f "$P/.babysit/tasks/beta/TASK.md" ] && ok "a named task lives in tasks/beta" || bad "no tasks/beta/TASK.md"
+[ -f "$P/.babysit/tasks/main/STATE.md" ] && ok "tasks keep separate state dirs" || bad "separate task state missing"
+out="$(cd "$P" && "$BABYSIT" ls 2>&1)"
+has "ls lists the default task" "main" "$out"
+has "ls lists the named task" "beta" "$out"
+out="$(cd "$P" && "$BABYSIT" status --task beta 2>&1)"
+has "status --task points at the task dir" "$P/.babysit/tasks/beta" "$out"
+has "status names the task" "task:       beta" "$out"
+out="$(cd "$P" && "$BABYSIT" print --task beta 2>&1)"
+has "the worker prompt points at the task dir" "$P/.babysit/tasks/beta/STATE.md" "$out"
+# a legacy flat layout (TASK.md directly in .babysit/) is still detected
+L="$WORK/legacyproj"; mkdir -p "$L"
+"$BABYSIT" init --goal "legacy task" --dir "$L/.babysit" >/dev/null 2>&1
+[ -f "$L/.babysit/TASK.md" ] && ok "legacy flat layout still initializes in .babysit" || bad "legacy init did not run"
+out="$(cd "$L" && "$BABYSIT" print 2>&1)"
+has "legacy layout is still detected without flags" "$L/.babysit/STATE.md" "$out"
+# two tasks under one project run their own supervisors side by side
+(cd "$P" && BABYSIT_CMD="bash $WORK/stub-slow.sh" "$BABYSIT" start --task main \
+   --max-sessions 50 --session-timeout 30 >/dev/null 2>&1)
+(cd "$P" && BABYSIT_CMD="bash $WORK/stub-slow.sh" "$BABYSIT" start --task beta \
+   --max-sessions 50 --session-timeout 30 >/dev/null 2>&1)
+has "task main has its own supervisor" "supervisor: RUNNING" "$(cd "$P" && "$BABYSIT" status --task main)"
+has "task beta has its own supervisor" "supervisor: RUNNING" "$(cd "$P" && "$BABYSIT" status --task beta)"
+out="$(cd "$P" && "$BABYSIT" start --task main 2>&1)"
+has "a second supervisor on the same task is refused" "already running" "$out"
+(cd "$P" && "$BABYSIT" stop --kill --task main >/dev/null 2>&1; "$BABYSIT" stop --kill --task beta >/dev/null 2>&1)
+for _ in $(seq 1 15); do pgrep -f "$P/.babysit" >/dev/null 2>&1 || break; sleep 1; done
+has "both task supervisors stopped" "supervisor: not running" "$(cd "$P" && "$BABYSIT" status --task beta)"
 
 printf '\n== results ==\n'
 printf 'passed: %s\nfailed: %s\n' "$PASS" "$FAIL"

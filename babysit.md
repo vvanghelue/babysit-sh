@@ -12,12 +12,14 @@ HOW TO USE THIS FILE (for the human, not for the agent)
   Or install by hand and skip the agent entirely:
 
     curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.sh | bash
-    $EDITOR .babysit/TASK.md
+    $EDITOR .babysit/tasks/main/TASK.md
     .babysit/babysit.sh start
 
   The agent is not the loop here. The *supervisor* is: .babysit/babysit.sh keeps
   starting fresh worker sessions until the task in TASK.md is done. This file
-  only bootstraps that supervisor and writes the task down properly.
+  only bootstraps that supervisor and writes the task down properly. One project
+  has one .babysit/ directory; each task lives in .babysit/tasks/<name>/ and has
+  its own supervisor, so several long tasks can run side by side.
 -->
 
 # babysit-sh — set up a supervised long-running task
@@ -41,8 +43,9 @@ Check for `.babysit/babysit.sh` in the project root. If it is not there:
 curl -fsSL https://raw.githubusercontent.com/vvanghelue/babysit-sh/main/install.sh | bash -s -- .
 ```
 
-That writes `.babysit/babysit.sh` plus `.babysit/TASK.md`, `.babysit/STATE.md`
-and `.babysit/WORKLOG.md`, and registers the project-level convention in
+That writes `.babysit/babysit.sh` plus the default task
+(`.babysit/tasks/main/TASK.md`, `.babysit/tasks/main/STATE.md` and
+`.babysit/tasks/main/WORKLOG.md`), and registers the project-level convention in
 `AGENTS.md` (plus a `CLAUDE.md` that imports it), so that **every future agent
 session in this project knows what "Using babysit, ..." means**. If you have a
 checkout of this repo, `./install.sh .` does the same thing, and `--link`
@@ -66,12 +69,23 @@ agent session — primed by `AGENTS.md` — writes `TASK.md` and starts the
 supervisor. That is a *different* session from this one: you are setting the
 table, not eating.
 
+One project can host several long tasks at once. They all live under the single
+`.babysit/` directory, one per name, each with its own supervisor:
+
+```bash
+.babysit/babysit.sh init --task migrate-db --goal "migrate the database"
+.babysit/babysit.sh start --task migrate-db
+.babysit/babysit.sh ls            # every task, and whether it is running
+```
+
+If you do not pass `--task`, everything defaults to the task named `main`.
+
 ---
 
 ## 2. Write the task properly
 
-`.babysit/TASK.md` is the only thing every worker session reads on every start.
-It must state:
+`.babysit/tasks/<name>/TASK.md` (the default task is `main`) is the only thing
+every worker session reads on every start. It must state:
 
 - **the goal** — the end state, not the activity
 - **the definition of done** — something observable and testable, because the
@@ -80,10 +94,10 @@ It must state:
 - **constraints** — what must not happen, what is expensive, what to skip
 - **notes for workers** — anything a fresh session would otherwise re-derive
 
-Edit `.babysit/TASK.md` now. Also seed `.babysit/STATE.md` with what you already
-know: what exists, what is already done, the first concrete next step, and any
-blockers. Do not leave it as a template — the first worker session will believe
-whatever is in there.
+Edit `.babysit/tasks/main/TASK.md` now. Also seed
+`.babysit/tasks/main/STATE.md` with what you already know: what exists, what is
+already done, the first concrete next step, and any blockers. Do not leave it as
+a template — the first worker session will believe whatever is in there.
 
 If you need the supervisor to stop without any worker cooperating, you can also
 give it a completion probe:
@@ -117,13 +131,22 @@ of work does not need 100 sessions; a migration that runs overnight does.
 ## 4. Start the supervisor and get out of the way
 
 ```bash
-.babysit/babysit.sh start            # detached; survives this shell
+.babysit/babysit.sh start            # detached; survives this shell (task main)
+```
+
+For a second task, give it a name and pass `--task` to every command:
+
+```bash
+.babysit/babysit.sh init --task migrate-db --goal "..."
+.babysit/babysit.sh start --task migrate-db
 ```
 
 Then:
 
 ```bash
+.babysit/babysit.sh ls               # every task and whether it is running
 .babysit/babysit.sh status           # alive? which session? heartbeat?
+.babysit/babysit.sh status --task migrate-db
 .babysit/babysit.sh tail             # follow the current worker session
 .babysit/babysit.sh logs 60          # supervisor decisions and exits
 .babysit/babysit.sh stop --kill      # human kill switch
@@ -160,7 +183,8 @@ of the loop, change them there so every future worker inherits them.
 ## 6. If something is wrong
 
 - `status` says `supervisor: not running` but the task is not done or stopped:
-  the supervisor died. Read `.babysit/supervisor.log`, fix the cause, and
+  the supervisor died. Read `.babysit/tasks/<name>/supervisor.log` (run
+  `.babysit/babysit.sh ls` if you are not sure which task), fix the cause, and
   `start` again. `STATE.md` still holds the progress.
 - `halted: no progress` — several sessions changed nothing. The task or the
   approach is wrong, not the wording. Rewrite `TASK.md`, `resume`, `start`.

@@ -12,7 +12,8 @@
 # it and acts: retry, escalate, or halt loudly.
 #
 #   babysit.sh detect                  which harness am I inside?
-#   babysit.sh init [--task T]         create .babysit/ (TASK.md, STATE.md, ...)
+#   babysit.sh init [--goal G]         create a task (TASK.md, STATE.md, ...)
+#   babysit.sh ls                      list the tasks in this project
 #   babysit.sh agents-md [--print]     register the "Using babysit" trigger in AGENTS.md
 #   babysit.sh run [options]           supervise sessions in the foreground
 #   babysit.sh start [options]         same as run --detach: survives your shell
@@ -38,15 +39,18 @@
 #   --harness H            [BABYSIT_HARNESS]             pi|opencode|codex|claude
 #   --model M              [BABYSIT_MODEL]               model for worker sessions
 #   --provider P           [BABYSIT_PROVIDER]            provider (pi only)
-#   --dir D                [BABYSIT_DIR=.babysit]        state directory
+#   --task NAME            [BABYSIT_TASK=main]           which task to operate on
+#   --dir D                [BABYSIT_DIR]                 raw state directory override
 #   --detach / --foreground
 #
 # Harness override for anything else:
 #   BABYSIT_CMD='mytool run --prompt-file @@PROMPT_FILE@@'
 #
 # The supervisor is just a process: run it under systemd, tmux, nohup or
-# `babysit.sh start`. Every task has its own BABYSIT_DIR, so several long tasks
-# can run side by side without knowing about each other.
+# `babysit.sh start`. One project has one .babysit/ directory: the driver, the
+# entry point, and a tasks/ registry. Each task keeps its state in
+# .babysit/tasks/<name>/ and its own supervisor, so several long tasks run side
+# by side without scattering .babysit-* directories at the project root.
 # =============================================================================
 set -uo pipefail
 
@@ -57,10 +61,22 @@ case "$SCRIPT_PATH" in
 esac
 ABS_SELF="$SCRIPT_DIR/$(basename "$SCRIPT_PATH")"
 
-PROJECT="${BABYSIT_PROJECT:-$(pwd)}"
-DIR="${BABYSIT_DIR:-$PROJECT/.babysit}"
+# The driver lives in <project>/.babysit/babysit.sh; the project is its parent
+# when it was installed there, otherwise the current directory.
+if [ -n "${BABYSIT_PROJECT:-}" ]; then
+  PROJECT="$BABYSIT_PROJECT"
+elif [ "$(basename "$SCRIPT_DIR")" = ".babysit" ]; then
+  PROJECT="$(cd "$SCRIPT_DIR/.." && pwd)"
+else
+  PROJECT="$(pwd)"
+fi
 
-# All paths derive from DIR, and --dir can change DIR, so keep them in one place.
+# BABYSIT_HOME is the one .babysit/ directory: driver, entry point and registry.
+# State for each task lives in $BABYSIT_HOME/tasks/<name>.
+BABYSIT_HOME="${BABYSIT_HOME:-$PROJECT/.babysit}"
+
+# All paths derive from DIR, and --dir/--task can change DIR, so keep them in
+# one place.
 set_paths() {
   TASK_FILE="$DIR/TASK.md"
   STATE_FILE="$DIR/STATE.md"
@@ -79,18 +95,51 @@ set_paths() {
   STATE_HASH_FILE="$DIR/state.hash"
   CURRENT_LOG_FILE="$DIR/current.log"
 }
-set_paths
 
-# --dir may appear anywhere on the command line; pull it out before dispatch so
-# every subcommand honours it, not just `run`.
+# --dir and --task may appear anywhere on the command line; pull them out before
+# dispatch so every subcommand honours them, not just `run`.
+#
+#   --dir D      raw escape hatch: use D as the state directory, period
+#   --task NAME  select $BABYSIT_HOME/tasks/NAME. Without either flag, the
+#                legacy flat $BABYSIT_HOME is used when it already holds a
+#                TASK.md, otherwise the default task "main".
+PRE_DIR=""
+TASK_NAME=""
 _pre=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dir) DIR="${2:?--dir needs a value}"; shift 2 ;;
+    --dir)  PRE_DIR="${2:?--dir needs a value}"; shift 2 ;;
+    --task) TASK_NAME="${2:?--task needs a value}"; shift 2 ;;
     *) _pre+=("$1"); shift ;;
   esac
 done
 set -- "${_pre[@]+${_pre[@]}}"
+
+if [ -n "$TASK_NAME" ]; then
+  case "$TASK_NAME" in
+    */*|*..*|*[!A-Za-z0-9._-]*)
+      printf 'ERROR: invalid task name: %s (use letters, digits, . _ -)\n' "$TASK_NAME" >&2
+      exit 1 ;;
+  esac
+fi
+
+if [ -n "$PRE_DIR" ]; then
+  DIR="$PRE_DIR"
+elif [ -n "$TASK_NAME" ]; then
+  DIR="$BABYSIT_HOME/tasks/$TASK_NAME"
+elif [ -n "${BABYSIT_DIR:-}" ]; then
+  DIR="$BABYSIT_DIR"
+elif [ -f "$BABYSIT_HOME/TASK.md" ]; then
+  DIR="$BABYSIT_HOME"            # legacy single-task layout
+else
+  DIR="$BABYSIT_HOME/tasks/main"
+fi
+
+if [ -z "$TASK_NAME" ]; then
+  if [ "$DIR" = "$BABYSIT_HOME" ]; then TASK_NAME="main"
+  else TASK_NAME="$(basename "$DIR")"; fi
+fi
+export BABYSIT_TASK="$TASK_NAME"
 export BABYSIT_DIR="$DIR"
 set_paths
 
@@ -293,20 +342,30 @@ agents_block() {
 
 This project is set up for [babysit-sh](https://github.com/vvanghelue/babysit-sh):
 an external supervisor, not the agent, runs each long task as a chain of fresh
-worker sessions. The driver is `.babysit/babysit.sh`; the task lives in
-`.babysit/TASK.md`.
+worker sessions. The driver is `.babysit/babysit.sh`, and one project has a
+single `.babysit/` directory holding a `tasks/` registry. Each task keeps its
+state in `.babysit/tasks/<name>/`; the default task is `main`.
 
 When the user says **"Using babysit, <goal>"** (or "babysit this", "run this as
 a long task"), do **not** do the work in this session:
 
-1. Write the goal and a *testable* definition of done into `.babysit/TASK.md`,
-   and seed `.babysit/STATE.md` with what already exists and the first next step.
+1. Write the goal and a *testable* definition of done into
+   `.babysit/tasks/main/TASK.md`, and seed `.babysit/tasks/main/STATE.md` with
+   what already exists and the first next step. For a *second*, separate long
+   task, name it and pass `--task NAME` everywhere:
+   `.babysit/babysit.sh init --task NAME --goal "..."`, then
+   `.babysit/babysit.sh start --task NAME`.
 2. Start the supervisor detached: `.babysit/babysit.sh start`
    For long tasks add `--max-sessions N`, `--session-timeout S`, and
    `--until "command"` when a probe can prove the goal is reached.
 3. Reply with the task, the budget, and how to watch or stop it
    (`status`, `tail`, `logs`, `stop --kill`), then end your turn. Never poll the
    supervisor, and never start a worker session by hand.
+
+`ls` lists every task and whether its supervisor is running:
+
+    .babysit/babysit.sh ls
+    .babysit/babysit.sh status --task NAME
 
 If `.babysit/babysit.sh` is missing, install it:
 
@@ -405,11 +464,11 @@ cmd_agents_md() {
 
 # --------------------------------------------------------------------- init --
 cmd_init() {
-  local task=""
+  local goal=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --task|--goal) task="${2:-}"; shift 2 ;;
-      *) shift ;;
+      --goal) goal="${2:-}"; shift 2 ;;
+      *) [ -z "$goal" ] && goal="$1"; shift ;;
     esac
   done
   mkdir -p "$DIR" "$SESS_DIR"
@@ -420,7 +479,7 @@ cmd_init() {
     cat >"$TASK_FILE" <<EOF
 # Long-running task
 
-${task:-<describe the end state in one or two sentences>}
+${goal:-<describe the end state in one or two sentences>}
 
 ## Definition of done
 
@@ -463,10 +522,11 @@ EOF
 EOF
   fi
   [ -f "$WORKLOG_FILE" ] || printf '# Worklog (append-only, one entry per session)\n\n' >"$WORKLOG_FILE"
-  printf 'initialized %s\n' "$DIR"
+  printf 'initialized task %s\n' "$BABYSIT_TASK"
+  printf '  dir    %s\n' "$DIR"
   printf '  task   %s\n' "$TASK_FILE"
   printf '  state  %s\n' "$STATE_FILE"
-  printf 'edit the task, then run: %s start\n' "$(basename "$ABS_SELF")"
+  printf 'edit the task, then run: %s start --task %s\n' "$(basename "$ABS_SELF")" "$BABYSIT_TASK"
 }
 
 # ------------------------------------------------------------- budget (tick) --
@@ -674,7 +734,7 @@ cmd_run() {
     esac
   done
 
-  [ -f "$TASK_FILE" ] || die "no $TASK_FILE -- run: $ABS_SELF init --task \"...\""
+  [ -f "$TASK_FILE" ] || die "no $TASK_FILE -- run: $ABS_SELF init --goal \"...\" (task $BABYSIT_TASK)"
   mkdir -p "$DIR" "$SESS_DIR"
 
   if [ -f "$DONE_FILE" ]; then
@@ -766,7 +826,7 @@ cmd_run() {
 }
 
 cmd_once() {
-  [ -f "$TASK_FILE" ] || die "no $TASK_FILE -- run: $ABS_SELF init --task \"...\""
+  [ -f "$TASK_FILE" ] || die "no $TASK_FILE -- run: $ABS_SELF init --goal \"...\" (task $BABYSIT_TASK)"
   local other; other="$(supervisor_pid || true)"
   if [ -n "$other" ]; then die "a supervisor is already running (pid $other)"; fi
   mkdir -p "$DIR" "$SESS_DIR"
@@ -781,12 +841,48 @@ cmd_once() {
   return "$SESSION_RC"
 }
 
+# --------------------------------------------------------------------- list --
+task_summary() { # task_summary <task-dir>
+  local d="$1" st="idle" pid n
+  [ -f "$d/DONE" ]   && st="done"
+  [ -f "$d/HALTED" ] && st="halted"
+  [ -f "$d/stop" ]   && st="stopped"
+  pid=""
+  if [ -f "$d/supervisor.pid" ]; then
+    pid="$(tr -dc '0-9' <"$d/supervisor.pid" 2>/dev/null || true)"
+  fi
+  if [ -n "$pid" ] && is_alive "$pid"; then st="running"; fi
+  n="$(awk -F= '$1 == "sessions_run" { print $2 }' "$d/counters" 2>/dev/null)"
+  [ -n "$n" ] || n=0
+  printf '%-8s sessions=%-4s %s' "$st" "$n" "$d"
+}
+
+cmd_ls() {
+  local root="$BABYSIT_HOME/tasks" d name any="no"
+  printf 'home: %s\n' "$BABYSIT_HOME"
+  if [ -f "$BABYSIT_HOME/TASK.md" ]; then
+    printf '  %-14s %s\n' '(local)' "$(task_summary "$BABYSIT_HOME")"
+    any="yes"
+  fi
+  if [ -d "$root" ]; then
+    for d in "$root"/*/; do
+      [ -d "$d" ] || continue
+      name="$(basename "$d")"
+      printf '  %-14s %s\n' "$name" "$(task_summary "${d%/}")"
+      any="yes"
+    done
+  fi
+  [ "$any" = "yes" ] || printf '  (no tasks yet -- run: %s init --goal "...")\n' "$(basename "$ABS_SELF")"
+}
+
 # ------------------------------------------------------------------- status --
 cmd_status() {
   local pid sesspid hb age now_s
   pid="$(supervisor_pid || true)"
   now_s="$(now)"
   printf 'project:    %s\n' "$PROJECT"
+  printf 'home:       %s\n' "$BABYSIT_HOME"
+  printf 'task:       %s\n' "$BABYSIT_TASK"
   printf 'dir:        %s\n' "$DIR"
   printf 'harness:    %s\n' "$(detect_harness)"
   if [ -n "$pid" ]; then
@@ -905,6 +1001,8 @@ cmd_detect() {
   local h; h="$(detect_harness)"
   printf 'harness=%s\n' "$h"
   printf 'project=%s\n' "$PROJECT"
+  printf 'home=%s\n' "$BABYSIT_HOME"
+  printf 'task=%s\n' "$BABYSIT_TASK"
   printf 'dir=%s\n' "$DIR"
   printf 'installed:'
   local c; for c in pi opencode codex claude; do
@@ -923,6 +1021,7 @@ usage() {
 case "${1:-help}" in
   detect) cmd_detect ;;
   init)   cmd_init "${@:2}" ;;
+  ls|tasks) cmd_ls ;;
   agents-md|agentsmd) cmd_agents_md "${@:2}" ;;
   run|start)
           if [ "${1}" = "start" ]; then shift; cmd_run --detach "$@"; else shift; cmd_run "$@"; fi ;;
